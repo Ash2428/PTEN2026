@@ -1,0 +1,15 @@
+
+
+# Once you receive the email from your sequencing company back, follow the instructions or options to download your data. Here is what I got 
+# I am downloading the data through the wget command on the SSD (make sure you have enough space on your ssd and for genetics, it is a shared drive across all the lab!)
+# Connect to campus vpn (GlobalProtect) and login. 
+
+#######################################################################################################################################
+# Login to your compute01
+mkdir PTEN2026
+cd PTEN/
+screen -S sufi_download
+########################################################################################################################################
+
+# detach from the screen
+# It will take a while for the data download
