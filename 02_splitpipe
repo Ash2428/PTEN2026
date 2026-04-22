@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+
+# Tutorial: Parse split-pipe Alignment Tool
+
+# Important!
+# This document assumes you are aligning to the human genome, that your project name is
+# village_seq2, and that you have 16 sublibraries
+
+# There are a lot of single-line commands that appear to be multi-line commands as they are too
+# long for a single line in MS Word
+
+# How to use screens
+# Start a screen with:
+screen -S your_screen_name
+# Detach from a screen with control+a d
+# Reattach to a screen with:
+screen -r your_screen_name
+# While attached to a screen, kill it with:
+exit
+
+# ─────────────────────────────────────────────
+# Download the data - You did this in 1. Downloading Data
+# ─────────────────────────────────────────────
+
+# In the email from Novogene or Ultima that lets you download the data, download it using the
+# Download data via cluster: instructions; be sure to execute the wget command while
+# attached to a screen
+
+# I recommend first creating a directory structure like this:
+cd /mnt/araval2
+mkdir PTEN2026   #you did this in 01_download step
+cd PTEN2026
+mkdir analysis genomes
+mkdir genomes/hg38
+for i in {1..16}; do mkdir analysis/sublibrary_${i}; done
+mkdir analysis/sublibraries_combined
+
+# Then download the data; be sure to start a screen first
+wget -r -b -c --user=somethingsomething.novogene.com:21/
+
+# The wget part might take a full day; you can install conda and the pipeline and
+# create a reference genome in the meantime
+
+# ─────────────────────────────────────────────
+# Install conda environment
+# ─────────────────────────────────────────────
+
+# You might have already done this; if doing conda activate spipe then split-pipe
+# --help gives you a list of split-pipe options, then you can either skip this part
+# or update your conda and split-pipe by not skipping it
+
+# GET THE LATEST CONDA ENVIRONMENT:
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+conda create -n spipenew conda-forge::python==3.13
+conda activate spipenew
+
+# If you close out of compute01, be sure to do conda activate spipe when you log in
+
+# ─────────────────────────────────────────────
+# Download the pipeline
+# ─────────────────────────────────────────────
+
+# Download ParseBiosciences-Pipeline.1.4.2.zip from here
+# I am using the most recent version of pipeline for PTEN2026 = 1.6.4
+
+# Open a new Terminal window
+cd Downloads
+scp ParseBiosciences-Pipeline.1.6.4.zip compute01.genetics.wisc.edu:/mnt/ssd/araval2/NEWPTEN2026/
+
+# You can close this window now and return to your ssd Terminal window
+cd /mnt/ssd/araval2/NEWPTEN2026
+unzip ParseBiosciences-Pipeline.1.6.4.zip
+cd ParseBiosciences-Pipeline.1.6.4
+bash ./install_dependencies_conda.sh -i -y
+pip install --no-cache-dir ./
+
+# ─────────────────────────────────────────────
+# Make a reference genome
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/genomes
+
+# Check the most recent release at https://ftp.ensembl.org/pub/; in my case, it is 115
+wget https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz
+
+# You may want to start a screen for the next wget command
+wget https://ftp.ensembl.org/pub/release-113/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+
+# If you want to create a custom reference genome (e.g. for checking Cas9 expression),
+# this is the point at which you would add stuff to the .gtf and .fa files
+split-pipe --mode mkref --genome_name hg38 --fasta Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz --genes Homo_sapiens.GRCh38.113.gtf.gz --output_dir hg38
+
+# I used this:
+/mnt/ssd/araval2/suficonda/envs/spipenew/bin/split-pipe --mode mkref --genome_name human_cas9 --fasta human_cas9.fa.gz --genes human_cas9.gtf.gz --output_dir hg38_cas9
+
+# 3/12/26 Adding Cas9 to hg38 and realignment:
+# /mnt/researchdrive/wolter4/Bioinformatics/misc/cas9.fa.gz
+# /mnt/researchdrive/wolter4/Bioinformatics/misc/cas9.gtf.gz
+
+# After copying them into your genomes folder, you just need to run these commands:
+cat Homo_sapiens.GRCh38.115.gtf.gz cas9.gtf.gz > human_cas9.gtf.gz
+cat Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz cas9.fa.gz > human_cas9.fa.gz
+
+# ─────────────────────────────────────────────
+# Concatenate the lanes
+# ─────────────────────────────────────────────
+
+# You only have to do this step if your data is split into several lanes,
+# and it probably will be
+
+# Be sure your data is fully downloaded before continuing
+# You should execute the cat commands while attached to a screen
+
+cd /mnt/ssd/[netid]/village_seq2/usftp21.novogene.com/01.RawData
+
+# Do ls SL1 to get an idea of what your data looks like
+ls SL1
+
+# Your files will probably look something like SL#_lettersandstuff_L#_#.fq.gz
+# That first # will be the sublibrary, the second # is the lane, and the third # will be 1 or 2
+# Files with a 1 for the third # are your read 1 .fq files and contain the cDNA reads,
+# files with a 2 are read 2 and contain barcode and poly-N sequences
+
+# Your read 1 and read 2 .fq files are split across multiple lanes, you need to combine them
+# I'm pretty sure this will work; execute each line one at a time
+
+for i in {1..8}; do
+cat SL${i}/*_1.fq.gz > SL${i}/cat_1.fq.gz &
+done
+wait
+for i in {1..8}; do
+cat SL${i}/*_2.fq.gz > SL${i}/cat_2.fq.gz &
+done
+wait
+
+# ─────────────────────────────────────────────
+# Align each sublibrary
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+
+# This next step will take forever (i.e. 12-24 hours)
+# Repeat the following steps for each X=1, 2, ..., 8; there is an example sample_list.txt
+# at the bottom of the document
+
+screen -S sufialign1
+
+# Increase your file descriptor limit
+ulimit -n 100000
+
+# Confirm it worked:
+ulimit -n
+
+# ─────────────────────────────────────────────
+# 26.2.26: Start a screen and run: Pool-1
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_1/Sublib_1-Z0001_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_1/Sublib_1-Z0001_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_1 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_1/Sublib_2-Z0002_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_1/Sublib_2-Z0002_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_2 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_1/Sublib_3-Z0003_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_1/Sublib_3-Z0003_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_3 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3/1/26: Started aligning 4,5,6 - Pool-2
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_2_ReSeq/Sublib_4-Z0004_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_2_ReSeq/Sublib_4-Z0004_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_4 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_2_ReSeq/Sublib_5-Z0005_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_2_ReSeq/Sublib_5-Z0005_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_5 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_2_ReSeq/Sublib_6-Z0006_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_2_ReSeq/Sublib_6-Z0006_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_6 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# Pool-3 Started 3.6.2026:
+# ─────────────────────────────────────────────
+
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_3/Sublib_7-Z0007_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_3/Sublib_7-Z0007_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_7 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_3/Sublib_8-Z0008_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_3/Sublib_8-Z0008_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_8 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_3/Sublib_9-Z0009_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_3/Sublib_9-Z0009_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_9 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3.3.2026 Pool-4
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_4/Sublib_10-Z0010_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_4/Sublib_10-Z0010_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_10 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_4/Sublib_11-Z0011_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_4/Sublib_11-Z0011_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_11 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_4/Sublib_12-Z0012_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_4/Sublib_12-Z0012_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_12 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3.6.2026 Pool-5
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_13-Z0017_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_13-Z0017_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_13 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_14-Z0014_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_14-Z0014_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_14 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_15-Z0015_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_15-Z0015_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_15 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/human_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_16-Z0016_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_16-Z0016_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_2/sublibrary_16 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# Attempt-3: ALIGNMENT USING Human Genome with Cas9 & GFP Construct: hg38_cas9
+# ─────────────────────────────────────────────
+
+# 3.17.26: Start a screen and run: Pool-1
+cd /mnt/ssd/araval2/PTEN2026
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_1/Sublib_1-Z0001_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_1/Sublib_1-Z0001_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_1 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_1/Sublib_2-Z0002_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_1/Sublib_2-Z0002_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_2 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_1/Sublib_3-Z0003_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_1/Sublib_3-Z0003_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_3 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3.25.26: Start a screen and run: Pool-2
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_2_ReSeq/Sublib_4-Z0004_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_2_ReSeq/Sublib_4-Z0004_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_4 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_2_ReSeq/Sublib_5-Z0005_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_2_ReSeq/Sublib_5-Z0005_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_5 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_2_ReSeq/Sublib_6-Z0006_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_2_ReSeq/Sublib_6-Z0006_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_6 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3.25.26: Start a screen and run: Pool-3
+# ─────────────────────────────────────────────
+
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_3/Sublib_7-Z0007_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_3/Sublib_7-Z0007_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_7 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_3/Sublib_8-Z0008_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_3/Sublib_8-Z0008_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_8 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_3/Sublib_9-Z0009_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_3/Sublib_9-Z0009_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_9 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3.27.26: Start a screen and run: Pool-4
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_4/Sublib_10-Z0010_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_4/Sublib_10-Z0010_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_10 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_4/Sublib_11-Z0011_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_4/Sublib_11-Z0011_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_11 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_4/Sublib_12-Z0012_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_4/Sublib_12-Z0012_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_12 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# 3.27.2026 Pool-5
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_13-Z0017_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_13-Z0017_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_13 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_14-Z0014_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_14-Z0014_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_14 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_15-Z0015_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_15-Z0015_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_15 \
+ --samp_list PTEN2026_sampletable
+
+split-pipe \
+ --mode all \
+ --chemistry v3 \
+ --kit WT_mega \
+ --genome_dir genomes/hg38_cas9/ \
+ --fq1 Wolter2_Project_001_Pool_5/Sublib_16-Z0016_S1_L001_R1_001.fastq.gz \
+ --fq2 Wolter2_Project_001_Pool_5/Sublib_16-Z0016_S1_L001_R2_001.fastq.gz \
+ --output_dir /mnt/ssd/araval2/PTEN2026/analysis_3/sublibrary_16 \
+ --samp_list PTEN2026_sampletable
+
+# ─────────────────────────────────────────────
+# Combine the sublibraries
+# ─────────────────────────────────────────────
+
+cd /mnt/ssd/araval2/PTEN2026/analysis_3
+
+# Use nano to create sublibs.lis
+# nano sublibs.lis
+# Inside the file you write:
+# sublibrary_1
+# sublibrary_2
+# sublibrary_3
+# sublibrary_4
+# sublibrary_5
+# sublibrary_6
+# sublibrary_7
+# sublibrary_8
+# sublibrary_9
+# sublibrary_10
+# sublibrary_11
+# sublibrary_12
+# sublibrary_13
+# sublibrary_14
+# sublibrary_15
+# sublibrary_16
+# Save with: CTRL + O, Enter, CTRL + X
+
+# Be sure to start a screen before executing the following line
+# Launch your conda environment inside the screen:
+conda activate spipenew
+export PATH="$CONDA_PREFIX/bin:$PATH"
+echo $CONDA_PREFIX
+which split-pipe
+which samtools
+which bwa
+which STAR
+
+split-pipe --mode comb --sublib_list sublibs.lis --output_dir sublibraries_combined
+
+# ─────────────────────────────────────────────
+# Copy data to researchdrive
+# Alignment complete!
+# ─────────────────────────────────────────────
+
+# Consider deleting all your cat_1.fq.gz and cat_2.fq.gz files before moving your data to
+# researchdrive: they take up a lot of space and can be easily remade
+
+# You can copy everything from ssd to researchdrive using the next two commands
+cd /mnt/ssd/araval2/PTEN2026
+
+# This is another good place to start a screen; be sure there is no folder called village_seq2
+# already on researchdrive, or else you will overwrite it
+cp -r village_seq2 /mnt/researchdrive/wolter4/
+
+# Consider removing your largest files from ssd to clear up space for others
+
+# ─────────────────────────────────────────────
+# Example Text Files
+# ─────────────────────────────────────────────
+
+# sample_list.txt:
+# ctrl_1 A1
+# KO_1 A2
+# ctrl_2 A3-A12
+# KO_2 B1-B10
+# ...
+
+# sublibs.lis:
+# sublibrary_1
+# sublibrary_2
+# sublibrary_3
+# sublibrary_4
+# sublibrary_5
+# sublibrary_6
+# sublibrary_7
+# sublibrary_8
+# sublibrary_9
+# sublibrary_10
+# sublibrary_11
+# sublibrary_12
+# sublibrary_13
+# sublibrary_14
+# sublibrary_15
+# sublibrary_16
